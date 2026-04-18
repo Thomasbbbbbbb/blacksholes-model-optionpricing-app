@@ -1,19 +1,14 @@
-# 🎈 Blank app template
+# Black-Scholes Option Pricing Platform
 
-A simple Streamlit app template for you to modify!
+Interactive platform for pricing European options using the Black-Scholes model.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+## Features
+- Closed-form BS pricing with real-time parameter adjustment
+- Monte Carlo simulation (50,000 paths) with BS comparison
+- Full Greeks dashboard — Delta, Gamma, Vega, Theta, Rho (analytical)
+- Price heatmap across Spot × Implied Volatility
+- P&L at expiry with profit/loss zones
 
-### How to run it on your own machine
-
-1. Install the requirements
-
-   ```
-   $ pip install -r requirements.txt
-   ```
-
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+## Run locally
+pip install -r requirements.txt
+streamlit run streamlit_app.py
