@@ -1,310 +1,239 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
 from scipy.stats import norm
-from numpy import log, sqrt, exp
 import matplotlib.pyplot as plt
-import seaborn as sns
+import matplotlib.colors as mcolors
 
-#######################
-# Page configuration
+# ─── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Black-Scholes Option Pricing Model",
+    page_title="Black-Scholes Option Pricing",
     page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-main.block-container {
-    max-width: 1200px;
-}
+# ─── Black-Scholes core functions ─────────────────────────────────────────────
 
-/* Conteneur CALL / PUT */
-.metric-container {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 14px;
-    width: 100%;
-    border-radius: 12px;
-    font-family: 'Segoe UI', sans-serif;
-    color: white;
-    font-weight: 600;
-    font-size: 1.4rem;
-    box-shadow: 0 3px 6px rgba(0,0,0,0.15);
-}
+def d1(S, K, T, r, sigma):
+    return (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
 
-/* CALL = vert */
-.metric-call {
-    background-color: #4CAF50;
-}
+def d2(S, K, T, r, sigma):
+    return d1(S, K, T, r, sigma) - sigma * np.sqrt(T)
 
-/* PUT = rouge */
-.metric-put {
-    background-color: #E53935;
-}
+def bs_price(S, K, T, r, sigma, option_type="call"):
+    """Black-Scholes closed-form price for European options."""
+    if T <= 0:
+        if option_type == "call":
+            return max(S - K, 0)
+        else:
+            return max(K - S, 0)
+    _d1 = d1(S, K, T, r, sigma)
+    _d2 = d2(S, K, T, r, sigma)
+    if option_type == "call":
+        return S * norm.cdf(_d1) - K * np.exp(-r * T) * norm.cdf(_d2)
+    else:
+        return K * np.exp(-r * T) * norm.cdf(-_d2) - S * norm.cdf(-_d1)
 
-.metric-label {
-    font-size: 0.9rem;
-    opacity: 0.9;
-    color: white;
-}
+# ─── Greeks ───────────────────────────────────────────────────────────────────
 
-.metric-value {
-    font-size: 1.9rem;
-    font-weight: 800;
-    margin-top: 4px;
-    color: white;
-}
-</style>
-""", unsafe_allow_html=True)
+def greeks(S, K, T, r, sigma, option_type="call"):
+    """Compute Delta, Gamma, Vega, Theta, Rho."""
+    if T <= 0:
+        return {"Delta": np.nan, "Gamma": np.nan, "Vega": np.nan, "Theta": np.nan, "Rho": np.nan}
+    _d1 = d1(S, K, T, r, sigma)
+    _d2 = d2(S, K, T, r, sigma)
+    pdf_d1 = norm.pdf(_d1)
 
+    # Delta
+    if option_type == "call":
+        delta = norm.cdf(_d1)
+    else:
+        delta = norm.cdf(_d1) - 1
 
-#############################################
-# Black-Scholes Class
-#############################################
+    # Gamma (same for call and put)
+    gamma = pdf_d1 / (S * sigma * np.sqrt(T))
 
-class BlackScholes:
-    def __init__(self, time_to_maturity, strike, current_price, volatility, interest_rate):
-        self.time_to_maturity = time_to_maturity
-        self.strike = strike
-        self.current_price = current_price
-        self.volatility = volatility
-        self.interest_rate = interest_rate
+    # Vega (same for call and put) — expressed per 1% move in vol
+    vega = S * pdf_d1 * np.sqrt(T) / 100
 
-    def _compute_d1_d2(self):
-        S = self.current_price
-        K = self.strike
-        T = self.time_to_maturity
-        sigma = self.volatility
-        r = self.interest_rate
+    # Theta — expressed per calendar day
+    if option_type == "call":
+        theta = (
+            - (S * pdf_d1 * sigma) / (2 * np.sqrt(T))
+            - r * K * np.exp(-r * T) * norm.cdf(_d2)
+        ) / 365
+    else:
+        theta = (
+            - (S * pdf_d1 * sigma) / (2 * np.sqrt(T))
+            + r * K * np.exp(-r * T) * norm.cdf(-_d2)
+        ) / 365
 
-        d1 = (log(S/K) + (r + 0.5 * sigma**2)*T) / (sigma * sqrt(T))
-        d2 = d1 - sigma * sqrt(T)
-        return d1, d2
+    # Rho — expressed per 1% move in rate
+    if option_type == "call":
+        rho = K * T * np.exp(-r * T) * norm.cdf(_d2) / 100
+    else:
+        rho = -K * T * np.exp(-r * T) * norm.cdf(-_d2) / 100
 
-    def calculate_prices(self):
-        S = self.current_price
-        K = self.strike
-        T = self.time_to_maturity
-        sigma = self.volatility
-        r = self.interest_rate
+    return {"Delta": delta, "Gamma": gamma, "Vega": vega, "Theta": theta, "Rho": rho}
 
-        if T <= 0 or sigma <= 0:
-            self.call_price = max(S-K, 0)
-            self.put_price = max(K-S, 0)
-            return self.call_price, self.put_price
+# ─── Monte Carlo pricer ───────────────────────────────────────────────────────
 
-        d1, d2 = self._compute_d1_d2()
+def mc_price(S, K, T, r, sigma, option_type="call", n_sims=50_000):
+    """Monte Carlo price via GBM simulation."""
+    np.random.seed(42)
+    Z = np.random.standard_normal(n_sims)
+    ST = S * np.exp((r - 0.5 * sigma ** 2) * T + sigma * np.sqrt(T) * Z)
+    if option_type == "call":
+        payoffs = np.maximum(ST - K, 0)
+    else:
+        payoffs = np.maximum(K - ST, 0)
+    return np.exp(-r * T) * np.mean(payoffs)
 
-        # Prix
-        self.call_price = S * norm.cdf(d1) - K * exp(-r*T) * norm.cdf(d2)
-        self.put_price  = K * exp(-r*T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+# ─── Sidebar: inputs ──────────────────────────────────────────────────────────
 
-        # Greeks
-        self.call_delta = norm.cdf(d1)
-        self.put_delta  = norm.cdf(d1) - 1  # formule correcte
+st.sidebar.header("Option Parameters")
 
-        self.call_gamma = norm.pdf(d1) / (S * sigma * sqrt(T))
-        self.put_gamma  = self.call_gamma
+S     = st.sidebar.number_input("Spot Price (S)", min_value=1.0, value=100.0, step=1.0)
+K     = st.sidebar.number_input("Strike Price (K)", min_value=1.0, value=100.0, step=1.0)
+T     = st.sidebar.number_input("Time to Expiry (T, years)", min_value=0.01, value=1.0, step=0.05)
+r     = st.sidebar.number_input("Risk-Free Rate (r, %)", min_value=0.0, value=5.0, step=0.1) / 100
+sigma = st.sidebar.number_input("Volatility (σ, %)", min_value=0.1, value=20.0, step=0.5) / 100
+opt   = st.sidebar.radio("Option Type", ["call", "put"])
 
-        self.vega = S * norm.pdf(d1) * sqrt(T)
+# ─── Main layout ──────────────────────────────────────────────────────────────
 
-        self.call_theta = -(S * norm.pdf(d1) * sigma) / (2*sqrt(T)) - r*K*exp(-r*T)*norm.cdf(d2)
-        self.put_theta  = -(S * norm.pdf(d1) * sigma) / (2*sqrt(T)) + r*K*exp(-r*T)*norm.cdf(-d2)
+st.title("📈 Black-Scholes Option Pricing Platform")
+st.caption("European options | Closed-form BS · Greeks · Monte Carlo · Heatmaps")
 
-        return self.call_price, self.put_price
+col1, col2, col3 = st.columns(3)
 
-
-#############################################
-# Heatmap function
-#############################################
-
-def plot_heatmap(bs_model, spot_range, vol_range, strike):
-    call_prices = np.zeros((len(vol_range), len(spot_range)))
-    put_prices = np.zeros((len(vol_range), len(spot_range)))
-
-    for i, vol in enumerate(vol_range):
-        for j, spot in enumerate(spot_range):
-            model = BlackScholes(bs_model.time_to_maturity, strike, spot, vol, bs_model.interest_rate)
-            c, p = model.calculate_prices()
-            call_prices[i][j] = c
-            put_prices[i][j]  = p
-
-    fig_call, ax = plt.subplots(figsize=(10,8))
-    sns.heatmap(call_prices, annot=True, cmap="viridis",
-                xticklabels=np.round(spot_range,2), yticklabels=np.round(vol_range,2),
-                fmt=".2f", ax=ax)
-    ax.set_title("CALL Price Heatmap")
-    ax.set_xlabel("Spot Price")
-    ax.set_ylabel("Volatility")
-
-    fig_put, ax2 = plt.subplots(figsize=(10,8))
-    sns.heatmap(put_prices, annot=True, cmap="viridis",
-                xticklabels=np.round(spot_range,2), yticklabels=np.round(vol_range,2),
-                fmt=".2f", ax=ax2)
-    ax2.set_title("PUT Price Heatmap")
-    ax2.set_xlabel("Spot Price")
-    ax2.set_ylabel("Volatility")
-
-    return fig_call, fig_put
-
-
-
-#############################################
-# Sidebar
-#############################################
-
-with st.sidebar:
-    st.header("Model Parameters")
-
-    current_price = st.number_input("Current Asset Price", value=100.0)
-    strike = st.number_input("Strike Price", value=100.0)
-    time_to_maturity = st.number_input("Time to Maturity (Years)", value=1.0)
-    volatility = st.number_input("Volatility (σ)", value=0.2)
-    interest_rate = st.number_input("Risk-Free Interest Rate", value=0.05)
-
-    st.markdown("---")
-    st.subheader("Heatmap Settings")
-
-    spot_min = st.number_input("Min Spot Price", value=current_price*0.8, min_value=0.01)
-    spot_max = st.number_input("Max Spot Price", value=current_price*1.2, min_value=0.01)
-
-    vol_min = st.slider("Min Vol (heatmap)", 0.01, 1.0, volatility*0.5)
-    vol_max = st.slider("Max Vol (heatmap)", 0.01, 1.0, volatility*1.5)
-
-    spot_range = np.linspace(spot_min, spot_max, 12)
-    vol_range = np.linspace(vol_min, vol_max, 12)
-
-
-#############################################
-# Main Page
-#############################################
-
-st.title("Black-Scholes Option Pricing Model")
-st.markdown("Compute option prices, Greeks, payoffs and heatmaps.")
-
-# Compute
-bs = BlackScholes(time_to_maturity, strike, current_price, volatility, interest_rate)
-call_price, put_price = bs.calculate_prices()
-
-#############################################
-# Input summary
-#############################################
-
-st.subheader("Input Summary")
-st.table(pd.DataFrame({
-    "Current Price":[current_price],
-    "Strike":[strike],
-    "Maturity":[time_to_maturity],
-    "Volatility":[volatility],
-    "Rate":[interest_rate]
-}))
-
-
-#############################################
-# CALL & PUT Buttons
-#############################################
-
-st.subheader("Option Prices")
-
-col1, col2 = st.columns(2)
+price_bs = bs_price(S, K, T, r, sigma, opt)
+price_mc = mc_price(S, K, T, r, sigma, opt)
+g = greeks(S, K, T, r, sigma, opt)
 
 with col1:
-    st.markdown(f"""
-        <div class="metric-container metric-call">
-            <div style="text-align:center;">
-                <div class="metric-label">CALL Price</div>
-                <div class="metric-value">${call_price:.2f}</div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-
+    st.metric("BS Price", f"${price_bs:.4f}")
 with col2:
-    st.markdown(f"""
-        <div class="metric-container metric-put">
-            <div style="text-align:center;">
-                <div class="metric-label">PUT Price</div>
-                <div class="metric-value">${put_price:.2f}</div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.metric("Monte Carlo Price (50k sims)", f"${price_mc:.4f}")
+with col3:
+    st.metric("MC vs BS Error", f"${abs(price_mc - price_bs):.4f}")
 
+st.divider()
 
-#############################################
-# Greeks table
-#############################################
+# ─── Greeks display ───────────────────────────────────────────────────────────
 
-st.subheader("Greeks")
+st.subheader("Option Greeks")
 
-st.table(pd.DataFrame({
-    "Greek":["Delta","Gamma","Vega","Theta"],
-    "Call":[bs.call_delta, bs.call_gamma, bs.vega, bs.call_theta],
-    "Put":[bs.put_delta, bs.put_gamma, bs.vega, bs.put_theta],
-}))
+greek_cols = st.columns(5)
+greek_labels = {
+    "Delta": "Δ  Sensitivity to S",
+    "Gamma": "Γ  Rate of Δ change",
+    "Vega":  "ν  Sensitivity to σ (per 1%)",
+    "Theta": "Θ  Time decay (per day)",
+    "Rho":   "ρ  Sensitivity to r (per 1%)"
+}
+for i, (name, label) in enumerate(greek_labels.items()):
+    greek_cols[i].metric(label, f"{g[name]:.5f}")
 
+st.divider()
 
-#############################################
-# Payoff plot
-#############################################
+# ─── Plots ────────────────────────────────────────────────────────────────────
 
-st.subheader("Payoff at Maturity")
+tab1, tab2, tab3 = st.tabs(["Price vs Spot", "Greeks vs Spot", "Price Heatmap"])
 
-S_range = np.linspace(0.5*strike, 1.5*strike, 200)
-call_payoff = np.maximum(S_range - strike, 0)
-put_payoff  = np.maximum(strike - S_range, 0)
+spot_range = np.linspace(max(S * 0.5, 1), S * 1.5, 200)
 
-fig, ax = plt.subplots()
-ax.plot(S_range, call_payoff, label="Call Payoff")
-ax.plot(S_range, put_payoff,  label="Put Payoff")
-ax.axvline(strike, linestyle="--")
-ax.set_xlabel("Underlying Price")
-ax.set_ylabel("Payoff")
+with tab1:
+    prices = [bs_price(s, K, T, r, sigma, opt) for s in spot_range]
+    intrinsic = [max(s - K, 0) if opt == "call" else max(K - s, 0) for s in spot_range]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(spot_range, prices, color="#1F3B73", linewidth=2, label="BS Price")
+    ax.plot(spot_range, intrinsic, color="#AAAAAA", linewidth=1, linestyle="--", label="Intrinsic Value")
+    ax.axvline(S, color="red", linestyle=":", linewidth=1, label=f"Current S = {S}")
+    ax.axvline(K, color="orange", linestyle=":", linewidth=1, label=f"Strike K = {K}")
+    ax.set_xlabel("Spot Price")
+    ax.set_ylabel("Option Price")
+    ax.set_title(f"{opt.capitalize()} Price vs Spot")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    st.pyplot(fig)
+
+with tab2:
+    delta_vals = [greeks(s, K, T, r, sigma, opt)["Delta"] for s in spot_range]
+    gamma_vals = [greeks(s, K, T, r, sigma, opt)["Gamma"] for s in spot_range]
+    vega_vals  = [greeks(s, K, T, r, sigma, opt)["Vega"]  for s in spot_range]
+    theta_vals = [greeks(s, K, T, r, sigma, opt)["Theta"] for s in spot_range]
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+    pairs = [
+        (axes[0, 0], delta_vals, "Delta (Δ)", "#1F3B73"),
+        (axes[0, 1], gamma_vals, "Gamma (Γ)", "#E87722"),
+        (axes[1, 0], vega_vals,  "Vega (ν)",  "#2E8B57"),
+        (axes[1, 1], theta_vals, "Theta (Θ)", "#CC2222"),
+    ]
+    for ax, vals, title, color in pairs:
+        ax.plot(spot_range, vals, color=color, linewidth=2)
+        ax.axvline(S, color="gray", linestyle=":", linewidth=1)
+        ax.set_title(title)
+        ax.set_xlabel("Spot Price")
+        ax.grid(alpha=0.3)
+    fig.tight_layout()
+    st.pyplot(fig)
+
+with tab3:
+    st.markdown("**Option Price as a function of Spot × Volatility**")
+
+    spot_grid  = np.linspace(S * 0.7, S * 1.3, 40)
+    sigma_grid = np.linspace(0.05, 0.60, 40)
+    Z = np.array([[bs_price(s, K, T, r, sv, opt) for s in spot_grid] for sv in sigma_grid])
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    cp = ax.contourf(spot_grid, sigma_grid * 100, Z, levels=25, cmap="YlOrRd")
+    plt.colorbar(cp, ax=ax, label="Option Price ($)")
+    ax.set_xlabel("Spot Price")
+    ax.set_ylabel("Implied Volatility (%)")
+    ax.set_title(f"{opt.capitalize()} Price Heatmap (Spot × Vol)")
+    ax.axvline(S, color="white", linestyle="--", linewidth=1.5, label=f"S = {S}")
+    ax.axhline(sigma * 100, color="cyan", linestyle="--", linewidth=1.5, label=f"σ = {sigma*100:.0f}%")
+    ax.legend()
+    st.pyplot(fig)
+
+# ─── Payoff at expiry ─────────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("Payoff at Expiry")
+
+payoff = [max(s - K, 0) if opt == "call" else max(K - s, 0) for s in spot_range]
+pnl    = [p - price_bs for p in payoff]
+
+fig, ax = plt.subplots(figsize=(8, 3))
+ax.plot(spot_range, pnl, color="#1F3B73", linewidth=2, label="P&L at expiry")
+ax.axhline(0, color="gray", linewidth=0.8)
+ax.axhline(-price_bs, color="red", linestyle="--", linewidth=1, label=f"Max loss = ${price_bs:.2f} (premium)")
+ax.fill_between(spot_range, pnl, 0, where=[p > 0 for p in pnl], alpha=0.15, color="green", label="Profit zone")
+ax.fill_between(spot_range, pnl, 0, where=[p < 0 for p in pnl], alpha=0.15, color="red", label="Loss zone")
+ax.set_xlabel("Spot Price at Expiry")
+ax.set_ylabel("P&L ($)")
+ax.set_title(f"Long {opt.capitalize()} P&L at Expiry")
 ax.legend()
-
+ax.grid(alpha=0.3)
 st.pyplot(fig)
 
+# ─── Model assumptions footer ─────────────────────────────────────────────────
 
-#############################################
-# Price vs spot
-#############################################
+with st.expander("Model assumptions & methodology"):
+    st.markdown("""
+**Black-Scholes (1973) closed-form solution**
+- Underlying follows Geometric Brownian Motion: $dS = \\mu S\\,dt + \\sigma S\\,dW_t$
+- Constant volatility and risk-free rate over the option's life
+- No dividends, frictionless markets, European-style exercise
 
-st.subheader("Option Price vs Spot")
+**Monte Carlo simulation**
+- 50,000 paths generated under the risk-neutral measure
+- Terminal stock price: $S_T = S_0 \\exp\\!\\left[(r - \\tfrac{1}{2}\\sigma^2)T + \\sigma\\sqrt{T}\\,Z\\right]$, $Z \\sim \\mathcal{N}(0,1)$
+- Discounted expected payoff: $e^{-rT}\\,\\mathbb{E}^\\mathbb{Q}[\\max(S_T - K,\\,0)]$
 
-spot_grid = np.linspace(spot_min, spot_max, 80)
-call_curve, put_curve = [], []
-
-for s in spot_grid:
-    m = BlackScholes(time_to_maturity, strike, s, volatility, interest_rate)
-    c, p = m.calculate_prices()
-    call_curve.append(c)
-    put_curve.append(p)
-
-fig2, ax2 = plt.subplots()
-ax2.plot(spot_grid, call_curve, label="Call")
-ax2.plot(spot_grid, put_curve, label="Put")
-ax2.legend()
-ax2.set_xlabel("Spot Price")
-ax2.set_ylabel("Option Price")
-
-st.pyplot(fig2)
-
-
-#############################################
-# Heatmaps
-#############################################
-
-st.subheader("Heatmaps")
-
-colh1, colh2 = st.columns(2)
-
-with colh1:
-    fig_call, _ = plot_heatmap(bs, spot_range, vol_range, strike)
-    st.pyplot(fig_call)
-
-with colh2:
-    _, fig_put = plot_heatmap(bs, spot_range, vol_range, strike)
-    st.pyplot(fig_put)
+**Greeks** are computed analytically from the BS formula.  
+Vega and Rho are expressed per 1% change in σ and r respectively.  
+Theta is expressed per calendar day.
+""")
